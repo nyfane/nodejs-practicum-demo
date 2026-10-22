@@ -204,6 +204,43 @@ jobs:
 
           bash scripts/smoke-test.sh \
             http://127.0.0.1:8080 "$APP_VERSION"
+    
+      - name: Test automatic rollback after a failed update
+        env:
+          APP_VERSION: ${{ github.sha }}
+        run: |
+          BASELINE_REVISION=$(kubectl --context kind-practicum \
+            -n test get deployment practicum-app \
+            -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')
+
+          echo "Known healthy revision: $BASELINE_REVISION"
+
+          # Deliberately make the updated Pods fail readiness checks.
+          kubectl --context kind-practicum -n test \
+            patch deployment practicum-app --type=strategic \
+            -p '{"spec":{"template":{"spec":{"containers":[{"name":"app","readinessProbe":{"httpGet":{"path":"/intentional-failure","port":"http"}}}]}}}}'
+
+          if kubectl --context kind-practicum -n test \
+            rollout status deployment/practicum-app --timeout=60s; then
+            echo "Unexpected result: the broken update succeeded"
+            exit 1
+          fi
+
+          echo "Update failed as expected; restoring the healthy revision"
+
+          bash scripts/rollback.sh "$BASELINE_REVISION"
+
+          kubectl --context kind-practicum -n test \
+            port-forward service/practicum-app 8080:80 \
+            > "$RUNNER_TEMP/rollback-port-forward.log" 2>&1 &
+
+          FORWARD_PID=$!
+          trap 'kill "$FORWARD_PID" 2>/dev/null || true' EXIT
+
+          bash scripts/smoke-test.sh \
+            http://127.0.0.1:8080 "$APP_VERSION"
+
+          echo "Automatic rollback and recovery verified"
 
       - name: Show Kubernetes diagnostics on failure
         if: failure()

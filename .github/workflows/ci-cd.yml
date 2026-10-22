@@ -131,3 +131,126 @@ jobs:
             --build-arg APP_VERSION="$APP_VERSION" \
             -t "$IMAGE_NAME:$APP_VERSION" .
           docker push "$IMAGE_NAME:$APP_VERSION"
+
+  deploy-test:
+    name: Deploy to Kubernetes test environment
+    needs: build-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: test
+
+    steps:
+      - name: Get repository files
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js for deployment scripts
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install kind and kubectl
+        run: |
+          mkdir -p "$RUNNER_TEMP/k8s-tools"
+
+          curl --fail --silent --show-error --location \
+            https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64 \
+            -o "$RUNNER_TEMP/k8s-tools/kind"
+
+          curl --fail --silent --show-error --location \
+            https://dl.k8s.io/release/v1.36.1/bin/linux/amd64/kubectl \
+            -o "$RUNNER_TEMP/k8s-tools/kubectl"
+
+          chmod +x "$RUNNER_TEMP/k8s-tools/kind"
+          chmod +x "$RUNNER_TEMP/k8s-tools/kubectl"
+
+          echo "$RUNNER_TEMP/k8s-tools" >> "$GITHUB_PATH"
+
+      - name: Create Kubernetes test cluster
+        run: kind create cluster --name practicum --wait 120s
+
+      - name: Build image for Kubernetes test
+        env:
+          APP_VERSION: ${{ github.sha }}
+        run: |
+          docker build \
+            --build-arg APP_VERSION="$APP_VERSION" \
+            -t "nodejs-practicum-demo:$APP_VERSION" .
+
+      - name: Load image into cluster
+        env:
+          APP_VERSION: ${{ github.sha }}
+        run: |
+          kind load docker-image \
+            "nodejs-practicum-demo:$APP_VERSION" \
+            --name practicum
+
+      - name: Deploy application
+        env:
+          APP_VERSION: ${{ github.sha }}
+        run: |
+          bash scripts/deploy.sh \
+            "nodejs-practicum-demo:$APP_VERSION"
+
+      - name: Verify application health and version
+        env:
+          APP_VERSION: ${{ github.sha }}
+        run: |
+          kubectl --context kind-practicum -n test \
+            port-forward service/practicum-app 8080:80 \
+            > "$RUNNER_TEMP/port-forward.log" 2>&1 &
+
+          FORWARD_PID=$!
+          trap 'kill "$FORWARD_PID" 2>/dev/null || true' EXIT
+
+          bash scripts/smoke-test.sh \
+            http://127.0.0.1:8080 "$APP_VERSION"
+    
+      - name: Test automatic rollback after a failed update
+        env:
+          APP_VERSION: ${{ github.sha }}
+        run: |
+          BASELINE_REVISION=$(kubectl --context kind-practicum \
+            -n test get deployment practicum-app \
+            -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')
+
+          echo "Known healthy revision: $BASELINE_REVISION"
+
+          # Deliberately make the updated Pods fail readiness checks.
+          kubectl --context kind-practicum -n test \
+            patch deployment practicum-app --type=strategic \
+            -p '{"spec":{"template":{"spec":{"containers":[{"name":"app","readinessProbe":{"httpGet":{"path":"/intentional-failure","port":"http"}}}]}}}}'
+
+          if kubectl --context kind-practicum -n test \
+            rollout status deployment/practicum-app --timeout=60s; then
+            echo "Unexpected result: the broken update succeeded"
+            exit 1
+          fi
+
+          echo "Update failed as expected; restoring the healthy revision"
+
+          bash scripts/rollback.sh "$BASELINE_REVISION"
+
+          kubectl --context kind-practicum -n test \
+            port-forward service/practicum-app 8080:80 \
+            > "$RUNNER_TEMP/rollback-port-forward.log" 2>&1 &
+
+          FORWARD_PID=$!
+          trap 'kill "$FORWARD_PID" 2>/dev/null || true' EXIT
+
+          bash scripts/smoke-test.sh \
+            http://127.0.0.1:8080 "$APP_VERSION"
+
+          echo "Automatic rollback and recovery verified"
+
+      - name: Show Kubernetes diagnostics on failure
+        if: failure()
+        run: |
+          kubectl --context kind-practicum -n test \
+            get pods,deployments,services || true
+
+          kubectl --context kind-practicum -n test \
+            describe pods || true
+
+      - name: Delete temporary cluster
+        if: always()
+        run: kind delete cluster --name practicum

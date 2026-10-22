@@ -49,3 +49,21 @@ jobs:
           name: coverage
           path: coverage/
           if-no-files-found: error
+
+  build-image:
+    name: Build Docker image
+    needs: build-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Get repository files
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        env:
+          APP_VERSION: ${{ github.sha }}
+        run: |
+          docker build \
+            --build-arg APP_VERSION="$APP_VERSION" \
+            -t "nodejs-practicum-demo:$APP_VERSION" .

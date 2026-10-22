@@ -1,0 +1,24 @@
+{
+  "name": "nodejs-practicum-demo",
+  "version": "1.0.0",
+  "description": " This is a practicum demo. A sample Node.js application demonstrating automated testing, code quality checks, and a Docker-based CI/CD pipeline.",
+  "main": "src/app.js",
+  "scripts": {
+    "test": "jest --coverage",
+    "lint": "eslint ."
+  },
+  "keywords": [],
+  "author": "Fanny Jeubou",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^5.3.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.13.0",
+    "globals": "^17.13.0",
+    "jest": "^30.5.2",
+    "supertest": "^7.3.1"
+  }
+}
